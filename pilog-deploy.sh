@@ -154,6 +154,58 @@ rm -f /etc/nginx/sites-enabled/default
 info "Testing nginx config..."
 nginx -t
 
+PORT=80
+
+info "Checking for processes using port $PORT..."
+
+# Ensure lsof is installed (Raspberry Pi OS = apt)
+if ! command -v lsof >/dev/null 2>&1; then
+    info "Installing lsof..."
+    sudo apt update -y && sudo apt install -y lsof
+fi
+
+# Get PIDs
+PIDS=$(lsof -t -i:$PORT 2>/dev/null)
+
+if [ -z "$PIDS" ]; then
+    info "No process is running on port $PORT."
+    exit 0
+fi
+
+info "Found process(es): $PIDS"
+
+# Try to detect service names (nginx, apache2, etc.)
+for PID in $PIDS; do
+    SERVICE=$(ps -p $PID -o comm=)
+
+    info "PID $PID is running: $SERVICE"
+
+    # Try stopping as a system service first
+    if systemctl list-units --type=service | grep -q "$SERVICE"; then
+        info "Attempting to stop service: $SERVICE"
+        if sudo systemctl stop $SERVICE; then
+            success "Service $SERVICE stopped."
+            continue
+        fi
+    fi
+
+    # Fallback: kill process
+    info "Stopping PID $PID..."
+
+    if kill $PID 2>/dev/null || sudo kill $PID 2>/dev/null; then
+        success "PID $PID terminated."
+    else
+        info "Force killing PID $PID..."
+        if kill -9 $PID 2>/dev/null || sudo kill -9 $PID 2>/dev/null; then
+            success "PID $PID force killed."
+        else
+            error "Failed to kill PID $PID."
+        fi
+    fi
+done
+
+success "Port $PORT is now free."
+
 info "Reloading nginx..."
 systemctl enable nginx --quiet
 systemctl reload-or-restart nginx
