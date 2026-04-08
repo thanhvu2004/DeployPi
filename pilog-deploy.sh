@@ -52,7 +52,6 @@ else
     KEYRING_DIR="/usr/share/keyrings"
     NODE_KEYRING="${KEYRING_DIR}/nodesource.gpg"
     NODE_LIST="/etc/apt/sources.list.d/nodesource.list"
-    DISTRO_CODENAME="$(lsb_release -sc)"
 
     mkdir -p "$KEYRING_DIR"
     curl -fsSL "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" \
@@ -71,12 +70,15 @@ if command -v cloudflared &>/dev/null; then
     success "cloudflared already installed ($(cloudflared --version 2>&1 | head -1)), skipping."
 else
     info "Installing cloudflared (arm64 / armv7 auto-detected)..."
-    ARCH=$(dpkg --print-architecture)   # arm64 or armhf
-    case "$ARCH" in
-        arm64)  CF_ARCH="arm64" ;;
-        armhf)  CF_ARCH="arm"   ;;
-        amd64)  CF_ARCH="amd64" ;;
-        *)      die "Unsupported architecture: $ARCH" ;;
+    # Use uname -m for true CPU arch — dpkg may report i386 on 32-bit userland
+    # running on 64-bit ARM hardware (common on Raspberry Pi OS Lite 32-bit)
+    CPU=$(uname -m)
+    case "$CPU" in
+        aarch64 | arm64) CF_ARCH="arm64" ;;
+        armv7l  | armv6l) CF_ARCH="arm"  ;;
+        x86_64)           CF_ARCH="amd64" ;;
+        i386 | i686)      CF_ARCH="386"   ;;
+        *)                die "Unsupported CPU architecture: $CPU" ;;
     esac
     CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}.deb"
     TMP_DEB=$(mktemp /tmp/cloudflared-XXXX.deb)
