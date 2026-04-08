@@ -7,7 +7,7 @@
 # =============================================================================
 set -euo pipefail
 
-# ── Colours ──────────────────────────────────────────────────────────────────
+# ── Colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 
@@ -16,16 +16,16 @@ success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 die()     { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
 
-# ── Config (edit if needed) ───────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 REPO_URL="https://github.com/parthhverma/pilog-react.git"
 APP_DIR="/var/www/pilog-react"
 BUILD_DIR="${APP_DIR}/build"
 NGINX_CONF="/etc/nginx/sites-available/pilog"
 NGINX_LINK="/etc/nginx/sites-enabled/pilog"
 TUNNEL_SERVICE="cloudflared"
-NODE_VERSION="20"                # LTS — change if needed
+NODE_VERSION="20"
 
-# ── Suppress apt interactivity warnings ──────────────────────────────────────
+# ── Suppress apt interactivity ────────────────────────────────────────────────
 export DEBIAN_FRONTEND=noninteractive
 APT_GET() { apt-get "$@"; }
 
@@ -37,12 +37,12 @@ echo -e "    Target: ${BOLD}pilog.thanhhvu.com${RESET}"
 echo -e "    Arch:   $(uname -m)  |  OS: $(. /etc/os-release && echo "$PRETTY_NAME")"
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
 
-# ── 1. System update & base deps ─────────────────────────────────────────────
+# ── 1. System update & base deps ──────────────────────────────────────────────
 info "Updating package lists..."
 APT_GET update -qq
 
 info "Installing base dependencies..."
-APT_GET install -y -qq curl git nginx ca-certificates gnupg lsb-release
+APT_GET install -y -qq curl git nginx ca-certificates gnupg lsb-release iproute2
 
 # ── 2. Node.js (manual NodeSource repo — no curl|bash, no bare apt) ──────────
 if node --version 2>/dev/null | grep -q "^v${NODE_VERSION}"; then
@@ -69,13 +69,13 @@ success "Node $(node --version) / npm $(npm --version)"
 if command -v cloudflared &>/dev/null; then
     success "cloudflared already installed ($(cloudflared --version 2>&1 | head -1)), skipping."
 else
-    info "Installing cloudflared (arm64 / armv7 auto-detected)..."
-    # Use uname -m for true CPU arch — dpkg may report i386 on 32-bit userland
-    # running on 64-bit ARM hardware (common on Raspberry Pi OS Lite 32-bit)
+    info "Installing cloudflared..."
+    # Use uname -m for true CPU arch — dpkg --print-architecture can report
+    # i386 on 32-bit Raspberry Pi OS even when the CPU is 64-bit ARM
     CPU=$(uname -m)
     case "$CPU" in
-        aarch64 | arm64) CF_ARCH="arm64" ;;
-        armv7l  | armv6l) CF_ARCH="arm"  ;;
+        aarch64 | arm64)  CF_ARCH="arm64" ;;
+        armv7l  | armv6l) CF_ARCH="arm"   ;;
         x86_64)           CF_ARCH="amd64" ;;
         i386 | i686)      CF_ARCH="386"   ;;
         *)                die "Unsupported CPU architecture: $CPU" ;;
@@ -94,7 +94,7 @@ if [[ -d "${APP_DIR}/.git" ]]; then
     git -C "$APP_DIR" fetch --quiet origin
     git -C "$APP_DIR" reset --hard origin/main --quiet
 else
-    info "Cloning ${REPO_URL} → ${APP_DIR}..."
+    info "Cloning ${REPO_URL} -> ${APP_DIR}..."
     git clone --depth 1 "$REPO_URL" "$APP_DIR"
 fi
 success "Source at ${APP_DIR}"
@@ -105,18 +105,49 @@ cd "$APP_DIR"
 npm ci --silent
 
 info "Building production bundle..."
-CI=false npm run build --silent    # CI=false avoids treating warnings as errors
-success "Build complete → ${BUILD_DIR}"
+CI=false npm run build --silent
+success "Build complete -> ${BUILD_DIR}"
 
-# Fix permissions so nginx can read the files
 chown -R www-data:www-data "$BUILD_DIR"
 chmod -R 755 "$BUILD_DIR"
 
-# ── 6. Configure nginx ────────────────────────────────────────────────────────
-info "Writing nginx config..."
-cat > "$NGINX_CONF" <<'NGINX'
+# ── 6. Port detection — use 80, fall back to next free port ──────────────────
+port_in_use() { ss -tlnp "sport = :$1" 2>/dev/null | grep -q LISTEN; }
+
+NGINX_PORT=80
+if port_in_use 80; then
+    OCCUPANT_PID=$(ss -tlnp 'sport = :80' 2>/dev/null \
+        | awk '/LISTEN/ {match($0,/pid=([0-9]+)/,a); if(a[1]) print a[1]}' \
+        | head -1)
+    OCCUPANT_NAME=$(ps -p "$OCCUPANT_PID" -o comm= 2>/dev/null || echo "unknown process")
+    warn "Port 80 is already in use by '${OCCUPANT_NAME}' (PID ${OCCUPANT_PID})."
+    warn "Scanning for a free fallback port..."
+
+    for CANDIDATE in 8080 8081 8082 8083 8088 8888 9000; do
+        if ! port_in_use "$CANDIDATE"; then
+            NGINX_PORT=$CANDIDATE
+            break
+        fi
+    done
+
+    # If NGINX_PORT is still 80 after the loop, every candidate was also taken
+    if [[ "$NGINX_PORT" -eq 80 ]]; then
+        die "All fallback ports (8080 8081 8082 8083 8088 8888 9000) are occupied. Free one and re-run."
+    fi
+
+    warn "nginx will listen on port ${NGINX_PORT} instead of 80."
+else
+    success "Port 80 is free — nginx will use it."
+fi
+
+# ── 7. Configure nginx ────────────────────────────────────────────────────────
+info "Writing nginx config (port ${NGINX_PORT})..."
+
+# Heredoc is unquoted so ${NGINX_PORT} expands; nginx's own $-variables are
+# escaped with a backslash so they are written literally into the config file.
+cat > "$NGINX_CONF" <<EOF
 server {
-    listen 80;
+    listen ${NGINX_PORT};
     server_name _;
 
     root /var/www/pilog-react/build;
@@ -124,20 +155,20 @@ server {
 
     # React Router: fall back to index.html for all routes
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files \$uri \$uri/ /index.html;
     }
 
     # Long-lived cache for hashed static assets
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
-        try_files $uri =404;
+        try_files \$uri =404;
     }
 
     # Security headers
-    add_header X-Frame-Options      "SAMEORIGIN"                    always;
-    add_header X-Content-Type-Options "nosniff"                     always;
-    add_header Referrer-Policy      "strict-origin-when-cross-origin" always;
+    add_header X-Frame-Options        "SAMEORIGIN"                      always;
+    add_header X-Content-Type-Options "nosniff"                         always;
+    add_header Referrer-Policy        "strict-origin-when-cross-origin" always;
 
     # Compression
     gzip on;
@@ -145,77 +176,23 @@ server {
                text/xml application/xml text/javascript image/svg+xml;
     gzip_min_length 1000;
 }
-NGINX
+EOF
 
-# Enable site and remove default
 ln -sf "$NGINX_CONF" "$NGINX_LINK"
 rm -f /etc/nginx/sites-enabled/default
 
 info "Testing nginx config..."
 nginx -t
 
-PORT=80
-
-info "Checking for processes using port $PORT..."
-
-# Ensure lsof is installed (Raspberry Pi OS = apt)
-if ! command -v lsof >/dev/null 2>&1; then
-    info "Installing lsof..."
-    sudo apt update -y && sudo apt install -y lsof
-fi
-
-# Get PIDs
-PIDS=$(lsof -t -i:$PORT 2>/dev/null)
-
-if [ -z "$PIDS" ]; then
-    info "No process is running on port $PORT."
-    exit 0
-fi
-
-info "Found process(es): $PIDS"
-
-# Try to detect service names (nginx, apache2, etc.)
-for PID in $PIDS; do
-    SERVICE=$(ps -p $PID -o comm=)
-
-    info "PID $PID is running: $SERVICE"
-
-    # Try stopping as a system service first
-    if systemctl list-units --type=service | grep -q "$SERVICE"; then
-        info "Attempting to stop service: $SERVICE"
-        if sudo systemctl stop $SERVICE; then
-            success "Service $SERVICE stopped."
-            continue
-        fi
-    fi
-
-    # Fallback: kill process
-    info "Stopping PID $PID..."
-
-    if kill $PID 2>/dev/null || sudo kill $PID 2>/dev/null; then
-        success "PID $PID terminated."
-    else
-        info "Force killing PID $PID..."
-        if kill -9 $PID 2>/dev/null || sudo kill -9 $PID 2>/dev/null; then
-            success "PID $PID force killed."
-        else
-            error "Failed to kill PID $PID."
-        fi
-    fi
-done
-
-success "Port $PORT is now free."
-
-info "Reloading nginx..."
+info "Starting nginx..."
 systemctl enable nginx --quiet
 systemctl reload-or-restart nginx
-success "nginx is serving the app on port 80"
+success "nginx is serving the app on port ${NGINX_PORT}"
 
-# ── 7. Cloudflare Tunnel ──────────────────────────────────────────────────────
+# ── 8. Cloudflare Tunnel ──────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}━━━  Cloudflare Tunnel setup  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 
-# Check if a tunnel is already running as a systemd service
 if systemctl is-active --quiet "${TUNNEL_SERVICE}"; then
     warn "A cloudflared service is already running. Skipping tunnel install."
     warn "To reconfigure, run: sudo cloudflared service uninstall"
@@ -224,18 +201,16 @@ else
     echo -e "  You need a ${BOLD}Cloudflare Tunnel token${RESET} for pilog.thanhhvu.com."
     echo -e "  ${YELLOW}How to get one (takes ~2 minutes):${RESET}"
     echo -e "  1. Go to https://one.dash.cloudflare.com/"
-    echo -e "  2. Networks → Tunnels → Create a tunnel → name it ${BOLD}pilog${RESET}"
-    echo -e "  3. Choose ${BOLD}Linux${RESET} → copy ONLY the token value after ${BOLD}--token${RESET}"
+    echo -e "  2. Networks -> Tunnels -> Create a tunnel -> name it ${BOLD}pilog${RESET}"
+    echo -e "  3. Choose ${BOLD}Linux${RESET} -> copy ONLY the token value after ${BOLD}--token${RESET}"
     echo -e "  4. Under ${BOLD}Public Hostnames${RESET}, add:"
-    echo -e "       Subdomain: pilog  |  Domain: thanhhvu.com  |  Service: http://localhost:80"
+    echo -e "       Subdomain: pilog  |  Domain: thanhhvu.com  |  Service: http://localhost:${NGINX_PORT}"
     echo -e "  5. Save and come back here.\n"
 
     while true; do
         read -rp "$(echo -e "${CYAN}Paste your tunnel token:${RESET} ")" CF_TOKEN
-        CF_TOKEN="${CF_TOKEN// /}"   # strip accidental spaces
-        if [[ -n "$CF_TOKEN" ]]; then
-            break
-        fi
+        CF_TOKEN="${CF_TOKEN// /}"
+        [[ -n "$CF_TOKEN" ]] && break
         warn "Token cannot be empty. Try again."
     done
 
@@ -244,9 +219,8 @@ else
 
     info "Enabling and starting cloudflared..."
     systemctl enable cloudflared --quiet
-    systemctl start  cloudflared
+    systemctl start cloudflared
 
-    # Brief wait to let tunnel establish
     sleep 4
 
     if systemctl is-active --quiet cloudflared; then
@@ -257,12 +231,15 @@ else
     fi
 fi
 
-# ── 8. Done ───────────────────────────────────────────────────────────────────
+# ── 9. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo -e " ${GREEN}${BOLD}Deployment complete!${RESET}"
 echo -e ""
-echo -e "  🌐  ${BOLD}https://pilog.thanhhvu.com${RESET}"
+echo -e "  🌐  ${BOLD}https://pilog.thanhhvu.com${RESET}  (via Cloudflare Tunnel)"
+if [[ "$NGINX_PORT" -ne 80 ]]; then
+    echo -e "  ⚠️   ${YELLOW}nginx bound to port ${NGINX_PORT} (port 80 was already taken)${RESET}"
+fi
 echo -e ""
 echo -e "  Useful commands:"
 echo -e "    Nginx status   : ${CYAN}systemctl status nginx${RESET}"
