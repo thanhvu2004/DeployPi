@@ -208,7 +208,7 @@ else
     echo -e "  5. Save and come back here.\n"
 
     while true; do
-        read -rp "$(echo -e "${CYAN}Paste your tunnel token:${RESET} ")" CF_TOKEN
+        read -rsp "$(echo -e "${CYAN}Paste your tunnel token:${RESET} ")" CF_TOKEN
         CF_TOKEN="${CF_TOKEN// /}"
         [[ -n "$CF_TOKEN" ]] && break
         warn "Token cannot be empty. Try again."
