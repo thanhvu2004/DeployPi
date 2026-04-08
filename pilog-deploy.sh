@@ -74,7 +74,7 @@ else
     # i386 on 32-bit Raspberry Pi OS even when the CPU is 64-bit ARM
     CPU=$(uname -m)
     case "$CPU" in
-        aarch64 | arm64)  CF_ARCH="arm64" ;;
+        aarch64 | arm64)  CF_ARCH="armhf" ;;
         armv7l  | armv6l) CF_ARCH="arm"   ;;
         x86_64)           CF_ARCH="amd64" ;;
         i386 | i686)      CF_ARCH="386"   ;;
