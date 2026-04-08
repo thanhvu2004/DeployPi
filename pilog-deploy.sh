@@ -25,6 +25,13 @@ NGINX_LINK="/etc/nginx/sites-enabled/pilog"
 TUNNEL_SERVICE="cloudflared"
 NODE_VERSION="20"                # LTS — change if needed
 
+# ── Suppress apt interactivity & "unstable CLI" warnings ─────────────────────
+export DEBIAN_FRONTEND=noninteractive
+# apt-get is used throughout; some third-party setup scripts (e.g. NodeSource)
+# internally invoke bare `apt` which prints a "not stable CLI" warning to stderr.
+# We silence that specific warning by filtering it out globally.
+APT_GET() { apt-get "$@" 2> >(grep -v "apt does not have a stable CLI interface" >&2); }
+
 # ── Root check ────────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash $0"
 
@@ -35,18 +42,18 @@ echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━�
 
 # ── 1. System update & base deps ─────────────────────────────────────────────
 info "Updating package lists..."
-apt-get update -qq
+APT_GET update -qq
 
 info "Installing base dependencies..."
-apt-get install -y -qq curl git nginx ca-certificates gnupg lsb-release
+APT_GET install -y -qq curl git nginx ca-certificates gnupg lsb-release
 
 # ── 2. Node.js (via NodeSource) ───────────────────────────────────────────────
 if node --version 2>/dev/null | grep -q "^v${NODE_VERSION}"; then
     success "Node.js ${NODE_VERSION} already installed, skipping."
 else
     info "Installing Node.js ${NODE_VERSION}.x..."
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash - >/dev/null
-    apt-get install -y -qq nodejs
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash - 2> >(grep -v "apt does not have a stable CLI interface" >&2) >/dev/null
+    APT_GET install -y -qq nodejs
 fi
 success "Node $(node --version) / npm $(npm --version)"
 
